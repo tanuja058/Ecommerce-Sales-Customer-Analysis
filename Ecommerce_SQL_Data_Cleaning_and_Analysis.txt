@@ -1,0 +1,478 @@
+E-COMMERCE SALES & CUSTOMER INSIGHTS
+SQL DATA CLEANING AND ANALYSIS — CONSOLIDATED PROJECT NOTES
+
+PROJECT OBJECTIVE
+Analyze e-commerce orders, products, customers, and order items using SQL Server, then use validated results in a one-page Power BI dashboard. Focus areas: sales performance, product/category performance, customer purchasing behavior, and order quality.
+
+IMPORTANT NOTES
+1. Run queries against cleaned working tables, not backup tables. Keep backups unchanged.
+2. Examples assume dbo.customers, dbo.orders, dbo.order_items, dbo.products.
+3. Examples assume columns customer_id, order_id, product_id, order_date, status, quantity, unit_price, product_name, category, and list_price. Adjust names if your schema differs.
+4. Previously identified issues included duplicate order IDs/rows in orders, NULL unit_price values in order_items, and inconsistent category formatting in products. Recheck current tables before making changes.
+5. Do not delete rows just because values are NULL or repeated. Determine whether they are invalid, legitimate, or conflicting records.
+6. Status labels below assume 'completed', 'canceled', and 'returned'. Use the exact labels from your data.
+7. quantity * unit_price is item-level sales, not necessarily net revenue. Discounts, shipping, taxes, refunds, and missing prices may affect actual revenue. Do not claim profit without cost data.
+
+============================================================
+SECTION A — INITIAL DATA PROFILING
+============================================================
+
+A1. Row counts — how much data is in each table?
+SELECT 'customers' AS Table_Name, COUNT(*) AS Total_Records FROM dbo.customers
+UNION ALL
+SELECT 'orders', COUNT(*) FROM dbo.orders
+UNION ALL
+SELECT 'order_items', COUNT(*) FROM dbo.order_items
+UNION ALL
+SELECT 'products', COUNT(*) FROM dbo.products;
+
+A2. Preview records — inspect columns and sample values.
+SELECT TOP 10 * FROM dbo.customers;
+SELECT TOP 10 * FROM dbo.orders;
+SELECT TOP 10 * FROM dbo.order_items;
+SELECT TOP 10 * FROM dbo.products;
+
+A3. Date range — what period do orders cover?
+SELECT MIN(order_date) AS First_Order_Date,
+       MAX(order_date) AS Last_Order_Date
+FROM dbo.orders;
+
+A4. Status values — what labels exist?
+SELECT status, COUNT(*) AS Row_Count
+FROM dbo.orders
+GROUP BY status
+ORDER BY Row_Count DESC;
+
+A5. Column names and data types:
+SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_NAME IN ('customers', 'orders', 'order_items', 'products')
+ORDER BY TABLE_NAME, ORDINAL_POSITION;
+
+============================================================
+SECTION B — DATA CLEANING AND VALIDATION
+============================================================
+
+B1. Find duplicate order IDs. Inspect results; do not delete automatically.
+SELECT order_id, COUNT(*) AS Row_Count
+FROM dbo.orders
+GROUP BY order_id
+HAVING COUNT(*) > 1
+ORDER BY Row_Count DESC;
+
+Inspect one duplicate order ID by replacing 12345:
+SELECT * FROM dbo.orders WHERE order_id = 12345;
+
+B2. Find rows that share selected order attributes. Add all relevant columns to this check as appropriate.
+SELECT customer_id, order_date, status, COUNT(*) AS Duplicate_Count
+FROM dbo.orders
+GROUP BY customer_id, order_date, status
+HAVING COUNT(*) > 1;
+Note: identical selected attributes do not prove rows are duplicates if order_id differs.
+
+B3. Duplicate customer IDs:
+SELECT customer_id, COUNT(*) AS Row_Count
+FROM dbo.customers
+GROUP BY customer_id
+HAVING COUNT(*) > 1;
+
+B4. Duplicate product IDs:
+SELECT product_id, COUNT(*) AS Row_Count
+FROM dbo.products
+GROUP BY product_id
+HAVING COUNT(*) > 1;
+
+B5. Duplicate order/product combinations. Only expect one row per combination if this matches the data model.
+SELECT order_id, product_id, COUNT(*) AS Row_Count
+FROM dbo.order_items
+GROUP BY order_id, product_id
+HAVING COUNT(*) > 1;
+
+B6. NULLs in key order columns:
+SELECT
+  SUM(CASE WHEN order_id IS NULL THEN 1 ELSE 0 END) AS Missing_Order_IDs,
+  SUM(CASE WHEN customer_id IS NULL THEN 1 ELSE 0 END) AS Missing_Customer_IDs,
+  SUM(CASE WHEN order_date IS NULL THEN 1 ELSE 0 END) AS Missing_Order_Dates,
+  SUM(CASE WHEN status IS NULL THEN 1 ELSE 0 END) AS Missing_Statuses
+FROM dbo.orders;
+
+B7. Missing unit prices and quantities:
+SELECT
+  COUNT(*) AS Total_Order_Items,
+  SUM(CASE WHEN unit_price IS NULL THEN 1 ELSE 0 END) AS Missing_Unit_Prices,
+  SUM(CASE WHEN quantity IS NULL THEN 1 ELSE 0 END) AS Missing_Quantities
+FROM dbo.order_items;
+
+Inspect affected rows:
+SELECT * FROM dbo.order_items
+WHERE unit_price IS NULL OR quantity IS NULL;
+
+Do not replace missing prices with zero unless a documented business rule supports it. Investigate source data or disclose incomplete sales values.
+
+B8. Suspicious quantities/prices:
+SELECT *
+FROM dbo.order_items
+WHERE quantity IS NULL OR quantity <= 0
+   OR unit_price IS NULL OR unit_price < 0;
+Zero price may be valid for a free item; investigate before changing records.
+
+B9. Category formatting:
+SELECT category, COUNT(*) AS Product_Count
+FROM dbo.products
+GROUP BY category
+ORDER BY category;
+
+Compare trimmed, lowercase category values:
+SELECT LOWER(LTRIM(RTRIM(category))) AS Normalized_Category,
+       COUNT(*) AS Product_Count
+FROM dbo.products
+GROUP BY LOWER(LTRIM(RTRIM(category)))
+ORDER BY Normalized_Category;
+Standardize labels only after confirming they mean the same category.
+
+B10. Orphaned foreign-key checks:
+-- Orders with no matching customer
+SELECT o.*
+FROM dbo.orders o
+LEFT JOIN dbo.customers c ON o.customer_id = c.customer_id
+WHERE c.customer_id IS NULL;
+
+-- Order items with no matching order
+SELECT oi.*
+FROM dbo.order_items oi
+LEFT JOIN dbo.orders o ON oi.order_id = o.order_id
+WHERE o.order_id IS NULL;
+
+-- Order items with no matching product
+SELECT oi.*
+FROM dbo.order_items oi
+LEFT JOIN dbo.products p ON oi.product_id = p.product_id
+WHERE p.product_id IS NULL;
+
+B11. Order price vs current product list price. A difference may be valid due to historical pricing or discounts.
+SELECT oi.order_id, oi.product_id, oi.unit_price, p.list_price
+FROM dbo.order_items oi
+JOIN dbo.products p ON oi.product_id = p.product_id
+WHERE oi.unit_price > p.list_price;
+
+B12. Check foreign-key status:
+SELECT name AS ForeignKeyName,
+       OBJECT_NAME(parent_object_id) AS ChildTable,
+       OBJECT_NAME(referenced_object_id) AS ParentTable,
+       is_disabled, is_not_trusted
+FROM sys.foreign_keys
+WHERE name IN ('FK_orders_customers',
+               'FK_order_items_orders',
+               'FK_order_items_products');
+A validated active constraint generally has is_disabled = 0 and is_not_trusted = 0.
+
+B13. Review primary keys:
+SELECT tc.TABLE_NAME, tc.CONSTRAINT_NAME, kcu.COLUMN_NAME, kcu.ORDINAL_POSITION
+FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+  ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+ AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
+WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+  AND tc.TABLE_NAME IN ('customers', 'orders', 'order_items', 'products')
+ORDER BY tc.TABLE_NAME, kcu.ORDINAL_POSITION;
+
+Possible keys: customers.customer_id, orders.order_id, products.product_id, and (order_id, product_id) for order_items only if each product appears at most once per order. Key columns must be non-NULL and unique.
+
+B14. Safe cleaning workflow:
+1. Keep a backup.
+2. Profile and identify issues with SELECT queries first.
+3. Decide the business rule for each issue.
+4. Correct types and standardized labels in working/staging tables.
+5. Remove only confirmed accidental duplicates using a stable row identifier and reviewed deletion plan.
+6. Resolve missing keys and invalid relationships; do not invent IDs.
+7. Rerun validation queries.
+8. Add keys only after checking uniqueness, NOT NULL requirements, and referential integrity.
+9. Record row counts and cleaning decisions.
+10. Connect Power BI to cleaned working tables and validate totals.
+
+============================================================
+SECTION C — BASIC BUSINESS ANALYSIS
+============================================================
+
+C1. Distinct orders by status:
+SELECT status, COUNT(DISTINCT order_id) AS Total_Orders
+FROM dbo.orders
+GROUP BY status
+ORDER BY Total_Orders DESC;
+Check duplicate order IDs and conflicting statuses before relying on the result.
+
+C2. Total units:
+SELECT SUM(quantity) AS Total_Units
+FROM dbo.order_items
+WHERE quantity IS NOT NULL;
+
+C3. Top 10 products by units:
+SELECT TOP 10 p.product_name, SUM(oi.quantity) AS Total_Units_Sold
+FROM dbo.order_items oi
+JOIN dbo.products p ON oi.product_id = p.product_id
+WHERE oi.quantity IS NOT NULL
+GROUP BY p.product_name
+ORDER BY Total_Units_Sold DESC;
+
+C4. Customers who placed any order:
+SELECT COUNT(DISTINCT customer_id) AS Customers_Who_Ordered
+FROM dbo.orders
+WHERE customer_id IS NOT NULL;
+
+C5. Customers with completed orders:
+SELECT COUNT(DISTINCT customer_id) AS Purchasing_Customers
+FROM dbo.orders
+WHERE status = 'completed' AND customer_id IS NOT NULL;
+
+C6. Customers with the most orders:
+SELECT TOP 10 customer_id, COUNT(DISTINCT order_id) AS Total_Orders
+FROM dbo.orders
+WHERE customer_id IS NOT NULL
+GROUP BY customer_id
+ORDER BY Total_Orders DESC;
+
+C7. Customers by city, only if customers has a city column:
+SELECT city, COUNT(DISTINCT customer_id) AS Total_Customers
+FROM dbo.customers
+GROUP BY city
+ORDER BY Total_Customers DESC;
+
+============================================================
+SECTION D — SALES PERFORMANCE ANALYSIS
+============================================================
+
+D1. Overall KPIs. This assumes each order_id has one consistent status. MAX(status) is only a convenient one-row summary, not a resolution for conflicting statuses. Missing prices are treated as zero in this total and may understate sales.
+WITH OrderSummary AS (
+  SELECT order_id, MAX(status) AS status
+  FROM dbo.orders
+  GROUP BY order_id
+),
+SalesSummary AS (
+  SELECT oi.order_id,
+         SUM(CASE WHEN oi.unit_price IS NOT NULL AND oi.quantity IS NOT NULL
+                  THEN oi.quantity * oi.unit_price ELSE 0 END) AS item_sales
+  FROM dbo.order_items oi
+  GROUP BY oi.order_id
+)
+SELECT
+  COUNT(*) AS Total_Orders,
+  SUM(CASE WHEN os.status = 'completed' THEN 1 ELSE 0 END) AS Completed_Orders,
+  SUM(CASE WHEN os.status = 'canceled' THEN 1 ELSE 0 END) AS Canceled_Orders,
+  SUM(CASE WHEN os.status = 'returned' THEN 1 ELSE 0 END) AS Returned_Orders,
+  SUM(CASE WHEN os.status = 'completed' THEN ss.item_sales ELSE 0 END) AS Completed_Item_Sales,
+  CAST(SUM(CASE WHEN os.status = 'completed' THEN ss.item_sales ELSE 0 END)
+       / NULLIF(SUM(CASE WHEN os.status = 'completed' THEN 1.0 ELSE 0 END), 0)
+       AS DECIMAL(18,2)) AS Average_Order_Value
+FROM OrderSummary os
+LEFT JOIN SalesSummary ss ON os.order_id = ss.order_id;
+
+D2. Monthly completed sales and month-over-month growth:
+WITH MonthlySales AS (
+  SELECT YEAR(o.order_date) AS Sales_Year,
+         MONTH(o.order_date) AS Sales_Month,
+         SUM(oi.quantity * oi.unit_price) AS Monthly_Sales
+  FROM dbo.orders o
+  JOIN dbo.order_items oi ON o.order_id = oi.order_id
+  WHERE o.status = 'completed'
+    AND oi.unit_price IS NOT NULL
+    AND oi.quantity IS NOT NULL
+  GROUP BY YEAR(o.order_date), MONTH(o.order_date)
+),
+SalesWithPreviousMonth AS (
+  SELECT *,
+         LAG(Monthly_Sales) OVER (ORDER BY Sales_Year, Sales_Month) AS Previous_Month_Sales
+  FROM MonthlySales
+)
+SELECT Sales_Year, Sales_Month, Monthly_Sales, Previous_Month_Sales,
+       CAST(100.0 * (Monthly_Sales - Previous_Month_Sales)
+            / NULLIF(Previous_Month_Sales, 0) AS DECIMAL(10,2)) AS Growth_Percentage
+FROM SalesWithPreviousMonth
+ORDER BY Sales_Year, Sales_Month;
+Months with no completed orders are absent; a calendar table is needed to show zero-sales months. Missing prices are excluded.
+
+D3. Sales by category:
+SELECT p.category,
+       SUM(oi.quantity * oi.unit_price) AS Category_Sales,
+       SUM(oi.quantity) AS Units_Sold,
+       COUNT(DISTINCT o.order_id) AS Orders_Count
+FROM dbo.orders o
+JOIN dbo.order_items oi ON o.order_id = oi.order_id
+JOIN dbo.products p ON oi.product_id = p.product_id
+WHERE o.status = 'completed'
+  AND oi.unit_price IS NOT NULL
+  AND oi.quantity IS NOT NULL
+GROUP BY p.category
+ORDER BY Category_Sales DESC;
+
+D4. Top 10 products by completed item sales:
+SELECT TOP 10 p.product_id, p.product_name, p.category,
+       SUM(oi.quantity * oi.unit_price) AS Product_Sales,
+       SUM(oi.quantity) AS Units_Sold,
+       COUNT(DISTINCT o.order_id) AS Orders_Count
+FROM dbo.orders o
+JOIN dbo.order_items oi ON o.order_id = oi.order_id
+JOIN dbo.products p ON oi.product_id = p.product_id
+WHERE o.status = 'completed'
+  AND oi.unit_price IS NOT NULL
+  AND oi.quantity IS NOT NULL
+GROUP BY p.product_id, p.product_name, p.category
+ORDER BY Product_Sales DESC;
+
+D5. Category contribution percentage:
+WITH CategorySales AS (
+  SELECT p.category, SUM(oi.quantity * oi.unit_price) AS Category_Sales
+  FROM dbo.orders o
+  JOIN dbo.order_items oi ON o.order_id = oi.order_id
+  JOIN dbo.products p ON oi.product_id = p.product_id
+  WHERE o.status = 'completed'
+    AND oi.unit_price IS NOT NULL
+    AND oi.quantity IS NOT NULL
+  GROUP BY p.category
+)
+SELECT category, Category_Sales,
+       CAST(100.0 * Category_Sales / NULLIF(SUM(Category_Sales) OVER (), 0)
+            AS DECIMAL(10,2)) AS Sales_Contribution_Percentage
+FROM CategorySales
+ORDER BY Sales_Contribution_Percentage DESC;
+
+============================================================
+SECTION E — CUSTOMER ANALYSIS
+============================================================
+
+E1. Top 10 customers by completed item sales:
+SELECT TOP 10 c.customer_id,
+       SUM(oi.quantity * oi.unit_price) AS Customer_Sales,
+       COUNT(DISTINCT o.order_id) AS Completed_Orders
+FROM dbo.customers c
+JOIN dbo.orders o ON c.customer_id = o.customer_id
+JOIN dbo.order_items oi ON o.order_id = oi.order_id
+WHERE o.status = 'completed'
+  AND oi.unit_price IS NOT NULL
+  AND oi.quantity IS NOT NULL
+GROUP BY c.customer_id
+ORDER BY Customer_Sales DESC;
+
+E2. One-time vs repeat purchasing customers:
+WITH CustomerOrders AS (
+  SELECT customer_id, COUNT(DISTINCT order_id) AS Completed_Orders
+  FROM dbo.orders
+  WHERE status = 'completed'
+  GROUP BY customer_id
+)
+SELECT CASE WHEN Completed_Orders = 1 THEN 'One-time Customer'
+            ELSE 'Repeat Customer' END AS Customer_Type,
+       COUNT(*) AS Customer_Count
+FROM CustomerOrders
+GROUP BY CASE WHEN Completed_Orders = 1 THEN 'One-time Customer'
+              ELSE 'Repeat Customer' END;
+Two or more completed orders count as repeat purchasing; this does not by itself prove long-term loyalty.
+
+============================================================
+SECTION F — ORDER QUALITY ANALYSIS
+============================================================
+
+F1. Cancellation and return counts/rates. Check that each order has one consistent status.
+WITH OrderSummary AS (
+  SELECT order_id, MAX(status) AS status
+  FROM dbo.orders
+  GROUP BY order_id
+)
+SELECT COUNT(*) AS Total_Orders,
+       SUM(CASE WHEN status = 'canceled' THEN 1 ELSE 0 END) AS Canceled_Orders,
+       SUM(CASE WHEN status = 'returned' THEN 1 ELSE 0 END) AS Returned_Orders,
+       CAST(100.0 * SUM(CASE WHEN status = 'canceled' THEN 1 ELSE 0 END)
+            / NULLIF(COUNT(*), 0) AS DECIMAL(10,2)) AS Cancellation_Rate_Percentage,
+       CAST(100.0 * SUM(CASE WHEN status = 'returned' THEN 1 ELSE 0 END)
+            / NULLIF(COUNT(*), 0) AS DECIMAL(10,2)) AS Return_Rate_Percentage
+FROM OrderSummary;
+
+F2. Monthly cancellation and return rates:
+WITH MonthlyOrders AS (
+  SELECT YEAR(order_date) AS Sales_Year,
+         MONTH(order_date) AS Sales_Month,
+         COUNT(DISTINCT order_id) AS Total_Orders,
+         COUNT(DISTINCT CASE WHEN status = 'canceled' THEN order_id END) AS Canceled_Orders,
+         COUNT(DISTINCT CASE WHEN status = 'returned' THEN order_id END) AS Returned_Orders
+  FROM dbo.orders
+  GROUP BY YEAR(order_date), MONTH(order_date)
+)
+SELECT Sales_Year, Sales_Month, Total_Orders, Canceled_Orders, Returned_Orders,
+       CAST(100.0 * Canceled_Orders / NULLIF(Total_Orders, 0) AS DECIMAL(10,2)) AS Cancellation_Rate,
+       CAST(100.0 * Returned_Orders / NULLIF(Total_Orders, 0) AS DECIMAL(10,2)) AS Return_Rate
+FROM MonthlyOrders
+ORDER BY Sales_Year, Sales_Month;
+
+F3. Missing-price effect:
+SELECT COUNT(*) AS Total_Order_Items,
+       SUM(CASE WHEN unit_price IS NULL THEN 1 ELSE 0 END) AS Missing_Unit_Price_Rows,
+       SUM(CASE WHEN unit_price IS NULL OR quantity IS NULL THEN 1 ELSE 0 END) AS Incomplete_Sales_Rows
+FROM dbo.order_items;
+
+============================================================
+SECTION G — POWER BI DASHBOARD PLAN
+============================================================
+
+Recommended four KPI cards:
+1. Completed Sales — item-level sales for completed orders, with missing-price limitation documented.
+2. Total Orders — distinct orders.
+3. Average Order Value — completed item sales divided by completed orders, with definition documented.
+4. Purchasing Customers — distinct customers with completed orders.
+
+Recommended visuals:
+1. Monthly Sales Growth — line chart.
+2. Sales by Category — bar chart.
+3. Top 10 Products by Sales — horizontal bar chart.
+4. Cancellation and Return Rate Trend — line chart.
+5. Category Performance Heatmap — matrix with categories by month and conditional formatting.
+
+Suggested slicers:
+- Order date
+- Product category
+- Order status, if useful
+
+Three insight themes to complete with actual query results:
+1. Sales performance: identify actual highest/lowest months and changes in sales.
+2. Product/category contribution: identify actual top products/categories and their contribution.
+3. Order quality: identify actual cancellation/return patterns and investigate causes.
+
+Do not state conclusions before reviewing actual results. Use actual values and time periods in the final dashboard.
+
+============================================================
+SECTION H — QUICK INDEX
+============================================================
+
+Basic analysis:
+- A1: table row counts
+- A2: sample records
+- A3: order date range
+- A4: status distribution
+- C1: distinct orders by status
+- C2: units
+- C3: top products by units
+- C4/C5: customers who ordered / purchasing customers
+- C6: most frequent customers
+- C7: customers by city, if available
+
+Data cleaning and validation:
+- B1/B2: duplicate order checks
+- B3/B4: duplicate customer/product IDs
+- B5: duplicate order-product combinations
+- B6/B7: NULL checks
+- B8: invalid quantities/prices
+- B9: category formatting
+- B10: orphaned relationships
+- B11: order price vs list price
+- B12/B13: foreign-key and primary-key checks
+
+Advanced analysis:
+- D1: overall KPIs
+- D2: monthly sales growth
+- D3: category sales
+- D4: top 10 products by sales
+- D5: category contribution
+- E1: top customers by sales
+- E2: one-time vs repeat customers
+- F1/F2: cancellation and return rates
+- F3: missing-price effect
+
+END OF PROJECT NOTES
